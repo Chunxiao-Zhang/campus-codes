@@ -1,0 +1,278 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+% 页面与基础
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{indentfirst}   % 让章节后首段也缩进
+\setlength{\parindent}{2em}
+
+\setstretch{1.2}
+
+% 数学
+\usepackage{amsmath,amssymb,bm}
+
+% 图表
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{caption}
+
+% 代码与链接
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+% 代码样式
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{teal},
+  stringstyle=\color{orange},
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  frame=single,
+  breaklines=true,
+  tabsize=2
+}
+
+
+
+\begin{document}
+% ===== 封面页 =====
+\begin{titlepage}
+  \centering
+  \vspace*{0.16\textheight}
+  {\zihao{2}\bfseries 物理信息神经网络（PINNs）实验报告\par}
+
+  \vspace*{0.48\textheight}
+
+  {\zihao{4}
+  \begin{tabular}{rrc}
+    姓名&： & 张春啸 \\
+    学号&： & 2021013475 \\
+    日期&： & 2026/3/30 \\
+  \end{tabular}
+  \par}
+
+  \vfill
+\end{titlepage}
+
+% ===== 目录页 =====
+\clearpage
+\tableofcontents
+\thispagestyle{plain}
+\clearpage
+
+\section{FDM数值方法}
+为获得 Burgers 方程的高可信参考解，采用有限差分法（FDM）进行数值求解。具体做法是：在空间区间 $x\in[-1,1]$ 与时间区间 $t\in[0,1]$ 上构造均匀网格；对扩散项 $u_{xx}$ 使用二阶中心差分离散，对对流项 $u u_x$ 使用随速度符号切换的一阶迎风差分离散；时间推进采用显式欧拉格式，并在每个时间步强制施加边界条件 $u(-1,t)=u(1,t)=0$。初值取 $u(x,0)=-\sin(\pi x)$。最终得到的时空离散解作为 PINNs 训练后评估时的参考真值，用于计算相对 $L_2$ 误差与 MSE 等指标。
+
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.75\textwidth]{topic2_pinns/outputs_run_1e-2/base/ref_field.png}
+  \caption{$\nu =0.01/\pi$ 下的FDM参考场}
+\end{figure}
+
+\section{标准PINNs方法}
+标准 PINNs 的核心思想是：用神经网络 $u_\theta(x,t)$ 近似 PDE 的解函数，并通过自动微分将物理方程残差直接加入训练目标。本文采用多层全连接网络（MLP）作为近似器，输入为 $(x,t)$，输出为标量场值 $u$。\par
+
+针对 Burgers 方程\par
+\[
+u_t + u u_x = \nu u_{xx},
+\]\par
+构造三部分损失：\par
+\[
+\mathcal{L}=\mathcal{L}_{ic}+\mathcal{L}_{bc}+\mathcal{L}_{pde},
+\]\par
+其中\par
+\[
+\mathcal{L}_{ic}=\frac{1}{N_{ic}}\sum_{i=1}^{N_{ic}}\left|u_\theta(x_i,0)-u_0(x_i)\right|^2,
+\]\par
+\[
+\mathcal{L}_{bc}=\frac{1}{N_{bc}}\sum_{j=1}^{N_{bc}}\left(\left|u_\theta(-1,t_j)-0\right|^2+\left|u_\theta(1,t_j)-0\right|^2\right),
+\]\par
+\[
+\mathcal{L}_{pde}=\frac{1}{N_f}\sum_{k=1}^{N_f}\left|u_t+u u_x-\nu u_{xx}\right|_{(x_k,t_k)}^2.
+\]\par
+这里 $u_t,u_x,u_{xx}$ 均由自动微分计算。训练时使用 Adam 优化器最小化总损失，并在采样点上不断迭代更新网络参数。最终在规则网格上评估预测解，与 FDM 参考解对比，计算相对 $L_2$ 误差和 MSE 作为性能指标。\par
+
+控制方程：\par
+\[
+u_t + u u_x = \nu u_{xx}, \quad x\in[-1,1],\ t\in[0,1].
+\]\par
+
+\section{改进方法}
+针对标准 PINNs 在小粘性系数下容易出现的收敛困难与误差偏大问题，本文采用了两种改进策略：自适应激活函数与残差自适应重采样（RAR）。\par
+
+\subsection{自适应激活函数（ada）}
+标准 MLP 常用固定激活 $\tanh(z)$。在本方法中，将其改为\par
+\[
+\tanh(\alpha z),
+\]\par
+其中 $\alpha$ 为可训练参数，并与网络权重共同优化。该设计能够动态调节网络非线性强度，使模型在训练过程中更灵活地适配不同尺度的解结构，尤其有助于提升对陡峭梯度区域的表达能力。
+
+\subsection{残差自适应重采样（rar）}
+标准 PINNs 常采用均匀随机采样 PDE 配点，可能导致高残差区域关注不足。RAR 的思路是周期性执行以下步骤：
+\begin{enumerate}
+  \item 在候选点池中随机采样；
+  \item 计算各点 PDE 残差幅值；
+  \item 选取残差最大的若干点（hard points）；
+  \item 用这些点替换部分训练配点，强化后续训练。
+\end{enumerate}\par
+通过“哪里误差大就重点学哪里”，RAR 可以在一定程度上缓解采样与难点区域错配问题，提升训练稳定性。\par
+
+本实验将以上两种方法分别与基线方法对比，评估它们在不同粘性系数下对相对 $L_2$ 误差和 MSE 的影响，并分析其有效性与局限性。\par
+
+\section{实验结果与分析}
+
+\subsection{可视化结果对比}
+
+为直观比较模型在不同粘性系数下的表现，本文先给出两组参数下的解场对比图。每组包含 4 幅图：FDM 参考解、base、ada、rar。
+
+\subsubsection{$\nu=0.01/\pi$}
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/base/ref_field.png}
+    \caption{FDM}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/base/pred_field.png}
+    \caption{base}
+  \end{subfigure}
+
+  \vspace{0.6em}
+
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/ada/pred_field.png}
+    \caption{ada}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/rar/pred_field.png}
+    \caption{rar}
+  \end{subfigure}
+  \caption{$\nu=0.01/\pi$ 下三种 PINNs 与 FDM 对比}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/base/error_field.png}
+    \caption{base}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/ada/error_field.png}
+    \caption{ada}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-2/rar/error_field.png}
+    \caption{rar}
+  \end{subfigure}
+  \caption{$\nu=0.01/\pi$ 下三种方法的误差场对比}
+\end{figure}
+
+\subsubsection{$\nu=0.001/\pi$}
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/base/ref_field.png}
+    \caption{FDM}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/base/pred_field.png}
+    \caption{base}
+  \end{subfigure}
+
+  \vspace{0.6em}
+
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/ada/pred_field.png}
+    \caption{ada}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/rar/pred_field.png}
+    \caption{rar}
+  \end{subfigure}
+  \caption{$\nu=0.001/\pi$ 下三种 PINNs 与 FDM 对比}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/base/error_field.png}
+    \caption{base}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/ada/error_field.png}
+    \caption{ada}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.32\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{topic2_pinns/outputs_run_1e-3/rar/error_field.png}
+    \caption{rar}
+  \end{subfigure}
+  \caption{$\nu=0.001/\pi$ 下三种方法的误差场对比}
+\end{figure}
+
+
+
+
+
+\subsection{定量指标分析}
+
+对应误差指标如下（rel\_l2 越小越好）：
+
+\begin{table}[H]
+  \centering
+  \caption{两组粘性系数下三种方法误差对比}
+  \begin{tabular}{c c c c}
+    \toprule
+    $\nu_{\text{input}}$ & 方法 & rel\_l2 & mse \\
+    \midrule
+    0.01  & base & 6.94496e-2 & 1.79318e-3 \\
+    0.01  & ada  & \textbf{2.75934e-2} & \textbf{2.83071e-4} \\
+    0.01  & rar  & 1.63941e-1 & 9.99209e-3 \\
+    0.001 & base & \textbf{4.47943e-1} & \textbf{7.62785e-2} \\
+    0.001 & ada  & 5.82598e-1 & 1.29031e-1 \\
+    0.001 & rar  & 4.48329e-1 & 7.64101e-2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{结果讨论}
+
+在 $\nu=0.01/\pi$ 条件下，ada 的结果最接近 FDM，误差明显低于 base 与 rar，说明自适应激活在该难度下能够提升拟合能力。  
+当粘性系数减小到 $\nu=0.001/\pi$ 时，三种方法误差均显著上升，表现出强对流场景下 PINNs 的训练退化现象；其中 base 与 rar 接近，ada 退化更明显。  
+总体来看，改进方法并非在所有参数区间都稳定优于基线，方法效果与问题刚性程度和训练超参数存在显著耦合，需要针对小粘性场景进一步调参或引入更强的训练策略。
+
+
+\end{document}
